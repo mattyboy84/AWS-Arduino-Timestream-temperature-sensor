@@ -4,7 +4,8 @@
 
 This uses the `Arduino MKR WiFi 1010` to publish Temperature & Humidity sensor data to `AWS Timestream` through `AWS IoT Core` using MQTT
 
-![Diagram](images/Diagram.png)
+![Diagram](images/diagram.png)
+
 ![Sketch](images/sketch.png)
 
 ## Setup
