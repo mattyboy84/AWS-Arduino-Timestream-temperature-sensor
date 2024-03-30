@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Transform:
+  - AWS::LanguageExtensions # use Fn::ToJsonString
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+  certificateArn:
+    Type: String
+    Description: Arn of the certificate that the device uses
+    Default: ''
+  certificateId:
+    Type: String
+    Description: Id of the certificate that the device uses
+    Default: ''
+
+Globals:
+  Function:
+    CodeUri: ./
+    Runtime: nodejs20.x
+    MemorySize: 3008
+    Timeout: 900
+
+Resources:
+  iotTimestreamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-iotTimestreamRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - iot.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: iotTimestreamRole-timestream
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "timestream:*"
+                  - "iot:*"
+                Resource: "*"
+        - PolicyName: iotTimestreamRole-error-logging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:DescribeLogGroups
+                Resource:
+                  - !GetAtt timestreamTemperatureRuleActionLogs.Arn
+                  - !GetAtt timestreamTemperatureRuleErrorLogs.Arn
+  
+  temperatureSensorThingPolicy:
+    Type: AWS::IoT::Policy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-policy"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: "iot:Connect"
+             # Allows all clients - clientIds are set from the MQTT library in the Arduino code (Not necessarily same as thing name)
+            Resource: !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:client/*"
+          - Effect: Allow
+            Action:
+              - "iot:Receive"
+              - "iot:Publish"
+              - "iot:Subscribe"
+            Resource:
+              - !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/*"
+              - !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/*"
+  
+  temperatureSensorThing:
+    Type: AWS::IoT::Thing
+    Properties:
+      # On the scale of millions of things, probably a uuid that's linked AWS side to a userId etc
+      # Something simple for testing
+      ThingName: !Sub "${AWS::StackName}-temperatureSensorThing"
+  
+  temperatureSensorThingPolicyAttachment:
+    Type: AWS::IoT::PolicyPrincipalAttachment
+    Properties:
+      PolicyName: !Ref temperatureSensorThingPolicy
+      Principal: !Ref certificateArn
+  
+  # Substitution tempaltes: https://docs.aws.amazon.com/iot/latest/developerguide/iot-substitution-templates.html
+  timestreamTemperatureRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: timestream_temperature_rule
+      TopicRulePayload:
+        AwsIotSqlVersion: '2016-03-23'
+        RuleDisabled: false
+        # Sql: !Sub "SELECT temperature, humidity, timestamp FROM '${AWS::StackName}/#'" # Wildcards - https://docs.aws.amazon.com/iot/latest/developerguide/iot-sql-from.html
+        Sql: !Sub "SELECT temperature, humidity, timestamp FROM '${AWS::StackName}'"
+        Actions:
+          - Timestream:
+              DatabaseName: !Ref temperatureDatabse
+              TableName: !GetAtt temperatureTable.Name
+              RoleArn: !GetAtt iotTimestreamRole.Arn
+              Dimensions:
+                - Name: deviceId
+                  Value: "${clientId()}"
+              Timestamp: # The 'time' column in timestream will now use the timestamp from my paylaod
+                Value: ${timestamp}
+                Unit: SECONDS # SECONDS, MILLISECONDS, MICROSECONDS, NANOSECONDS
+          - CloudwatchLogs:
+              BatchMode: false
+              LogGroupName: !Ref timestreamTemperatureRuleActionLogs
+              RoleArn: !GetAtt iotTimestreamRole.Arn
+        ErrorAction:
+          CloudwatchLogs:
+            BatchMode: false
+            LogGroupName: !Ref timestreamTemperatureRuleErrorLogs
+            RoleArn: !GetAtt iotTimestreamRole.Arn
+  
+  timestreamTemperatureRuleErrorLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', [/aws/timestream/, timestreamTemperatureRuleErrorLogs]]
+  
+  timestreamTemperatureRuleActionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', [/aws/timestream/, timestreamTemperatureRuleActionLogs]]
+  
+  temperatureDatabse:
+    Type: AWS::Timestream::Database
+    Properties:
+      DatabaseName: !Sub "${AWS::StackName}-database"
+  
+  temperatureTable:
+    Type: AWS::Timestream::Table
+    Properties:
+      DatabaseName: !Ref temperatureDatabse
+      TableName: !Sub "${AWS::StackName}-table"
+      Schema: 
+        CompositePartitionKey: 
+          - EnforcementInRecord: REQUIRED
+            Name: deviceId
+            Type: DIMENSION
+      # MagneticStoreWriteProperties: 
+      #   MagneticStoreWriteProperties
+      # RetentionProperties: 
+      #   RetentionProperties
+
+Outputs:
+  temperatureSensorThingId:
+    Value: !GetAtt temperatureSensorThing.Id
+    Description: Id of temperatureSensorThing
+  temperatureSensorThingArn:
+    Value: !GetAtt temperatureSensorThing.Arn
+    Description: Arn of temperatureSensorThing
